@@ -24,12 +24,15 @@
 // (target.json, updated by the machine that runs it) and passes along the ?k= part of the link you were sent.
 (async () => {
   const msg = document.getElementById('msg');
-  const k = new URLSearchParams(location.search).get('k');
+  const q = new URLSearchParams(location.search), k = q.get('k');
   if (!k) { msg.textContent = 'This dashboard is private. Open it with the full link you were sent.'; return; }
+  // optional: &page=factors opens the Correlations page, &league=<key> opens a league's tab (letters, digits and _ only)
+  const page = /^[a-z]{1,20}$/.test(q.get('page') || '') ? '/' + q.get('page') : '/';
+  const league = /^[a-z0-9_]{1,40}$/.test(q.get('league') || '') ? '&league=' + q.get('league') : '';
   try {
     const t = await (await fetch('target.json?t=' + Date.now(), {cache: 'no-store'})).json();
     if (!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(t.url)) throw new Error('no address');
-    location.replace(t.url + '/?k=' + encodeURIComponent(k));
+    location.replace(t.url + page + '?k=' + encodeURIComponent(k) + league);
   } catch (e) {
     msg.textContent = 'The dashboard is offline or restarting. Try again in a few minutes.';
   }
