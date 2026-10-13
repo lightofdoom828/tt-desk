@@ -20,22 +20,79 @@
   <p id="msg">Opening the dashboard…</p>
 </main>
 <script>
-// This page holds no data and no key. It forwards to wherever the dashboard is being served right now
+// This page holds no key and no readable data. It forwards to wherever the dashboard is being served right now
 // (target.json, updated by the machine that runs it) and passes along the ?k= part of the link you were sent.
+// When that machine is asleep or offline it shows the last copy the machine left here (snap.bin). The copy is
+// locked with the same key, so it opens only from the full link. &snap=1 shows the copy even when the machine is up.
+const PAGES = [['', 'TT Elite'], ['czech_liga_pro', 'Czech'], ['factors', 'Correlations']];
+
+async function alive(url) {
+  if (!url) return false;
+  const c = new AbortController(), t = setTimeout(() => c.abort(), 6000);
+  try { const r = await fetch(url + '/api/ping?t=' + Date.now(), {cache: 'no-store', signal: c.signal}); return r.ok && (await r.text()) === 'ok'; }
+  catch (e) { return false; }
+  finally { clearTimeout(t); }
+}
+
+async function unlock(buf, k) {
+  const b = new Uint8Array(buf);
+  if (String.fromCharCode(...b.slice(0, 4)) !== 'TTS1') throw new Error('not a snapshot');
+  const raw = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('tt-desk-snap|' + k));
+  const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
+  const zipped = await crypto.subtle.decrypt({name: 'AES-GCM', iv: b.slice(4, 16)}, key, b.slice(16));
+  const text = await new Response(new Blob([zipped]).stream().pipeThrough(new DecompressionStream('deflate'))).text();
+  return JSON.parse(text);
+}
+
+function banner(snap, want, k, url) {
+  // runs inside the shown copy: a bar that says what this is, and links that stay on this page
+  const forced = !!new URLSearchParams(location.search).get('snap');
+  const here = location.pathname + '?k=' + encodeURIComponent(k) + (forced ? '&snap=1' : '');
+  const link = p => here + (p === 'factors' ? '&page=factors' : p ? '&league=' + p : '');
+  const when = new Date(snap.generated * 1000).toLocaleString('en-AU', {timeZone: 'Australia/Melbourne', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false});
+  const tabs = PAGES.filter(([p]) => snap.pages[p || snap.default]).map(([p, name]) =>
+    `<a href="${link(p)}" style="color:${(p || snap.default) === want ? '#f0f7f2' : '#22e07a'};margin-left:14px;text-decoration:none;font-weight:600">${name}</a>`).join('');
+  const bar = `<div style="position:sticky;top:0;z-index:99;background:#0b1a12;border-bottom:1px solid #22e07a;color:#a9bbb0;font:14px/1.4 'Segoe UI',system-ui,sans-serif;padding:9px 16px;display:flex;flex-wrap:wrap;align-items:center;gap:4px">`
+    + `<span><b style="color:#f5c542">Saved copy</b> · numbers as of ${when} Melbourne · `
+    + (forced ? 'preview of what the link shows while the machine that runs the desk is asleep or offline' : 'the machine that runs the desk is asleep or offline; this page goes live again by itself when it is back') + '</span>'
+    + `<span style="margin-left:auto">${tabs}</span></div>`;
+  return bar + '<scr' + 'ipt>(() => {'
+    + `const fix = {'/': ${JSON.stringify(link(''))}, '/factors': ${JSON.stringify(link('factors'))}};`
+    + `const relink = () => document.querySelectorAll('a[href]').forEach(a => { const h = a.getAttribute('href'); if (fix[h]) a.setAttribute('href', fix[h]); });`
+    + `document.addEventListener('DOMContentLoaded', relink); setTimeout(relink, 800);`
+    + (url && !forced ? `setInterval(async () => { try { const r = await fetch(${JSON.stringify(url)} + '/api/ping?t=' + Date.now(), {cache: 'no-store'}); if (r.ok) location.reload(); } catch (e) {} }, 60000);` : '')
+    + '})();</scr' + 'ipt>';
+}
+
 (async () => {
   const msg = document.getElementById('msg');
   const q = new URLSearchParams(location.search), k = q.get('k');
   if (!k) { msg.textContent = 'This dashboard is private. Open it with the full link you were sent.'; return; }
   // optional: &page=factors opens the Correlations page, &league=<key> opens a league's tab (letters, digits and _ only)
-  const page = /^[a-z]{1,20}$/.test(q.get('page') || '') ? '/' + q.get('page') : '/';
-  const league = /^[a-z0-9_]{1,40}$/.test(q.get('league') || '') ? '&league=' + q.get('league') : '';
+  const pageName = /^[a-z]{1,20}$/.test(q.get('page') || '') ? q.get('page') : '';
+  const leagueKey = /^[a-z0-9_]{1,40}$/.test(q.get('league') || '') ? q.get('league') : '';
+  let url = '';
   try {
     const t = await (await fetch('target.json?t=' + Date.now(), {cache: 'no-store'})).json();
-    if (!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(t.url)) throw new Error('no address');
-    location.replace(t.url + page + '?k=' + encodeURIComponent(k) + league);
-  } catch (e) {
-    msg.textContent = 'The dashboard is offline or restarting. Try again in a few minutes.';
+    if (/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(t.url)) url = t.url;
+  } catch (e) {}
+  if (!q.get('snap') && await alive(url)) {
+    location.replace(url + '/' + pageName + '?k=' + encodeURIComponent(k) + (leagueKey ? '&league=' + leagueKey : ''));
+    return;
   }
+  msg.textContent = 'The live dashboard is not answering. Opening the last saved copy…';
+  let buf;
+  try {
+    const r = await fetch('snap.bin?t=' + Date.now(), {cache: 'no-store'});
+    if (!r.ok) throw new Error('none');
+    buf = await r.arrayBuffer();
+  } catch (e) { msg.textContent = 'The dashboard is offline or restarting, and there is no saved copy yet. Try again in a few minutes.'; return; }
+  let snap;
+  try { snap = await unlock(buf, k); }
+  catch (e) { msg.textContent = 'The dashboard is offline, and this link could not open the saved copy. Check that you have the full link you were sent.'; return; }
+  const want = pageName === 'factors' && snap.pages.factors ? 'factors' : snap.pages[leagueKey] ? leagueKey : snap.default;
+  const html = snap.pages[want].replace(/<body[^>]*>/, m => m + banner(snap, want, k, url));
+  document.open(); document.write(html); document.close();
 })();
 </script>
 </body>
